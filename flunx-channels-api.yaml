@@ -1,0 +1,34 @@
+# API de canais (Evolution + Supabase). Exposta em https://api-canais.flunx.com.br
+# Crie /root/flunx-channels-api/.env com PORT, EVOLUTION_BASE_URL, EVOLUTION_API_KEY,
+# SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY (ver .env.example).
+
+services:
+  api:
+    image: flunx-channels-api:latest
+    environment:
+      PORT: "3001"
+    volumes:
+      - type: bind
+        source: /root/flunx-channels-api/.env
+        target: /app/.env
+        read_only: true
+    networks:
+      - externa
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        traefik.enable: "true"
+        traefik.docker.network: "externa"
+        traefik.http.routers.flunx-channels-api.rule: "Host(`api-canais.flunx.com.br`)"
+        traefik.http.routers.flunx-channels-api.entrypoints: "websecure"
+        traefik.http.routers.flunx-channels-api.tls.certresolver: "cf"
+        traefik.http.services.flunx-channels-api.loadbalancer.server.port: "3001"
+        traefik.http.services.flunx-channels-api.loadbalancer.passHostHeader: "true"
+
+networks:
+  externa:
+    external: true
