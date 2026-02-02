@@ -1,7 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import { createInstance, connectInstance, getConnectionState, evolutionBaseUrl, setWebhook, deleteInstance, fetchInstanceInfo, formatBrazilianPhone, logoutInstance, sendText } from "./evolution.js";
+import { createInstance, connectInstance, getConnectionState, evolutionBaseUrl, setWebhook, deleteInstance, fetchInstanceInfo, formatBrazilianPhone, logoutInstance, sendText, findChats } from "./evolution.js";
 import { getSupabaseClient } from "./supabase.js";
 import { handleEvolutionWebhook } from "./webhookEvolution.js";
 
@@ -557,6 +557,139 @@ app.get("/inboxes/:inboxId/conversations", async (req, res) => {
     res.json({ conversations: result });
   } catch (err) {
     console.error("[GET /inboxes/:inboxId/conversations] Error:", err);
+    res.status(500).json({ error: err.message || "Internal server error" });
+  }
+});
+
+// POST /inboxes/:inboxId/sync — Sincroniza conversas existentes da Evolution
+app.post("/inboxes/:inboxId/sync", async (req, res) => {
+  const supabase = requireAuth(req, res);
+  if (!supabase) return;
+
+  const { inboxId } = req.params;
+  if (!isValidUUID(inboxId)) {
+    return res.status(400).json({ error: "Invalid inbox ID format" });
+  }
+
+  try {
+    const { data: inbox, error: inboxError } = await supabase
+      .from("chat_inboxes")
+      .select("id, organization_id, evolution_instance_name, connection_status")
+      .eq("id", inboxId)
+      .single();
+
+    if (inboxError || !inbox) {
+      return res.status(404).json({ error: "Inbox not found" });
+    }
+
+    if (inbox.connection_status !== "connected" || !inbox.evolution_instance_name) {
+      return res.status(400).json({
+        error: "Inbox must be connected to sync",
+        detail: "Channel must have evolution_instance_name and connection_status 'connected'",
+      });
+    }
+
+    const findResult = await findChats(inbox.evolution_instance_name);
+    if (!findResult.success) {
+      return res.status(502).json({
+        error: "Failed to fetch chats from Evolution",
+        detail: findResult.error,
+      });
+    }
+
+    const chats = findResult.chats || [];
+    const serviceSupabase = getSupabaseClient(null);
+
+    let contactsCreated = 0;
+    let conversationsCreated = 0;
+
+    for (const chat of chats) {
+      const remoteJid = chat.id?.remoteJid || chat.remoteJid || chat.id;
+      if (!remoteJid || typeof remoteJid !== "string") continue;
+
+      // Ignora grupos (@g.us) por enquanto
+      if (remoteJid.endsWith("@g.us")) continue;
+
+      const name = chat.name || chat.pushName || remoteJid.replace(/@.*$/, "") || remoteJid;
+      const sourceId = `${inbox.id}_${remoteJid}`;
+
+      let contactId = null;
+      const { data: existingContact } = await serviceSupabase
+        .from("chat_contacts")
+        .select("id")
+        .eq("inbox_id", inbox.id)
+        .eq("remote_jid", remoteJid)
+        .maybeSingle();
+
+      if (existingContact) {
+        contactId = existingContact.id;
+      } else {
+        const { data: newContact, error: contactError } = await serviceSupabase
+          .from("chat_contacts")
+          .insert({
+            inbox_id: inbox.id,
+            organization_id: inbox.organization_id,
+            remote_jid: remoteJid,
+            source_id: sourceId,
+            name,
+          })
+          .select("id")
+          .single();
+        if (!contactError && newContact) {
+          contactId = newContact.id;
+          contactsCreated++;
+        }
+      }
+
+      if (!contactId) continue;
+
+      const { data: existingConv } = await serviceSupabase
+        .from("chat_conversations")
+        .select("id")
+        .eq("inbox_id", inbox.id)
+        .eq("contact_id", contactId)
+        .maybeSingle();
+
+      if (!existingConv) {
+        const { error: convError } = await serviceSupabase
+          .from("chat_conversations")
+          .insert({
+            inbox_id: inbox.id,
+            contact_id: contactId,
+            organization_id: inbox.organization_id,
+            status: "open",
+          });
+        if (!convError) conversationsCreated++;
+      }
+    }
+
+    const { count: convCount } = await serviceSupabase
+      .from("chat_conversations")
+      .select("*", { count: "exact", head: true })
+      .eq("inbox_id", inboxId);
+
+    const { count: contactCount } = await serviceSupabase
+      .from("chat_contacts")
+      .select("*", { count: "exact", head: true })
+      .eq("inbox_id", inboxId);
+
+    await serviceSupabase
+      .from("chat_inboxes")
+      .update({
+        contacts_count: contactCount ?? 0,
+        conversations_count: convCount ?? 0,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", inboxId);
+
+    res.json({
+      success: true,
+      chats_processed: chats.length,
+      contacts_created: contactsCreated,
+      conversations_created: conversationsCreated,
+    });
+  } catch (err) {
+    console.error("[POST /inboxes/:inboxId/sync] Error:", err);
     res.status(500).json({ error: err.message || "Internal server error" });
   }
 });

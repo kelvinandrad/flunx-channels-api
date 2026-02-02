@@ -237,4 +237,74 @@ export async function sendText(instanceName, number, text) {
   }
 }
 
+/**
+ * Busca todos os chats da instância Evolution.
+ * POST /chat/findChats/{instanceName}
+ * Retorna lista de chats com id, remoteJid, name, unreadCount, etc.
+ * @param {string} instanceName - Nome da instância
+ * @returns {Promise<{ success: boolean, chats?: array, error?: string }>}
+ */
+export async function findChats(instanceName) {
+  if (!instanceName) {
+    return { success: false, error: "instanceName is required" };
+  }
+  try {
+    const res = await fetch(`${baseUrl}/chat/findChats/${encodeURIComponent(instanceName)}`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        success: false,
+        error: data?.message || data?.error || `HTTP ${res.status}`,
+        status: res.status,
+      };
+    }
+    const chats = Array.isArray(data) ? data : data?.chats ?? data?.data ?? [];
+    return { success: true, chats };
+  } catch (e) {
+    return { success: false, error: e.message || "Evolution findChats failed" };
+  }
+}
+
+/**
+ * Busca mensagens de um chat na Evolution.
+ * POST /chat/findMessages/{instanceName}
+ * Body: { where: { key: { remoteJid: "..." } }, limit?: number }
+ * @param {string} instanceName - Nome da instância
+ * @param {string} remoteJid - JID do chat (ex: 5562999999999@s.whatsapp.net)
+ * @param {number} [limit=50] - Limite de mensagens
+ * @returns {Promise<{ success: boolean, messages?: array, error?: string }>}
+ */
+export async function findMessages(instanceName, remoteJid, limit = 50) {
+  if (!instanceName || !remoteJid) {
+    return { success: false, error: "instanceName and remoteJid are required" };
+  }
+  try {
+    const body = {
+      where: { key: { remoteJid } },
+      limit: Math.min(Math.max(limit, 1), 100),
+    };
+    const res = await fetch(`${baseUrl}/chat/findMessages/${encodeURIComponent(instanceName)}`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        success: false,
+        error: data?.message || data?.error || `HTTP ${res.status}`,
+        status: res.status,
+      };
+    }
+    const messages = Array.isArray(data) ? data : data?.messages ?? data?.data ?? [];
+    return { success: true, messages };
+  } catch (e) {
+    return { success: false, error: e.message || "Evolution findMessages failed" };
+  }
+}
+
 export { baseUrl as evolutionBaseUrl };
