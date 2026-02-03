@@ -19,9 +19,10 @@ import {
   sendText,
   findContacts,
   fetchAllGroups,
+  findChats,
 } from "./evolution.js";
 import { getSupabaseClient, supabaseAdmin } from "./supabase.js";
-import { handleEvolutionWebhook } from "./webhookEvolution.js";
+import { handleEvolutionWebhook, extractMessageContent } from "./webhookEvolution.js";
 import { authMiddleware, validateOrganizationAccess } from "./auth.js";
 import { randomId, isValidUUID, slugify } from "./utils.js";
 
@@ -432,11 +433,15 @@ app.post("/inboxes/:inboxId/sync", authMiddleware, async (req, res) => {
   try {
     const findResult = await findContacts(inbox.evolution_instance_name);
     const groupsResult = await fetchAllGroups(inbox.evolution_instance_name);
+    const chatsResult = await findChats(inbox.evolution_instance_name);
     const contacts = findResult.success ? findResult.contacts || [] : [];
     const groups = groupsResult.success ? groupsResult.groups || [] : [];
+    const chats = chatsResult.success ? chatsResult.chats || [] : [];
 
     let contactsCreated = 0;
     let conversationsCreated = 0;
+    let chatsProcessed = 0;
+    let messagesInserted = 0;
 
     const upsertContactAndConversation = async (
       remoteJid,
@@ -487,7 +492,7 @@ app.post("/inboxes/:inboxId/sync", authMiddleware, async (req, res) => {
           contactsCreated++;
         }
       }
-      if (!contactId) return;
+      if (!contactId) return null;
 
       const { data: existingConv } = await supabaseAdmin
         .from("chat_conversations")
@@ -496,17 +501,27 @@ app.post("/inboxes/:inboxId/sync", authMiddleware, async (req, res) => {
         .eq("contact_id", contactId)
         .maybeSingle();
 
+      let conversationId = existingConv?.id ?? null;
+
       if (!existingConv) {
-        const { error: convError } = await supabaseAdmin
+        const { data: newConv, error: convError } = await supabaseAdmin
           .from("chat_conversations")
           .insert({
             inbox_id: inbox.id,
             contact_id: contactId,
             organization_id: inbox.organization_id,
             status: "open",
-          });
-        if (!convError) conversationsCreated++;
+          })
+          .select("id")
+          .single();
+        if (!convError && newConv?.id) {
+          conversationId = newConv.id;
+          conversationsCreated++;
+        }
       }
+
+      if (!conversationId) return { contactId };
+      return { contactId, conversationId };
     };
 
     for (const contact of contacts) {
@@ -533,6 +548,129 @@ app.post("/inboxes/:inboxId/sync", authMiddleware, async (req, res) => {
       await upsertContactAndConversation(remoteJid, name, "group", avatarUrl);
     }
 
+    const upsertMessageFromChat = async (
+      conversationId,
+      remoteJid,
+      isGroup,
+      message
+    ) => {
+      if (!conversationId || !message) return false;
+      const evolutionMessageId =
+        message?.key?.id ??
+        message?.key?.messageId ??
+        message?.id ??
+        message?.messageId ??
+        null;
+
+      if (evolutionMessageId) {
+        const { data: existing } = await supabaseAdmin
+          .from("chat_messages")
+          .select("id")
+          .eq("evolution_message_id", evolutionMessageId)
+          .maybeSingle();
+        if (existing) return false;
+      }
+
+      const content =
+        extractMessageContent(message) ??
+        message?.text ??
+        message?.body ??
+        message?.message?.conversation ??
+        null;
+      if (content == null) return false;
+
+      const isFromMe =
+        message?.key?.fromMe ??
+        message?.key?.from_me ??
+        message?.fromMe ??
+        false;
+      const timestamp =
+        message?.messageTimestamp ??
+        message?.message_timestamp ??
+        message?.timestamp ??
+        message?.conversationTimestamp ??
+        Date.now() / 1000;
+      const createdAt = new Date(Number(timestamp) * 1000).toISOString();
+
+      await supabaseAdmin.from("chat_messages").insert({
+        conversation_id: conversationId,
+        content: content || "",
+        direction: isFromMe ? "outgoing" : "incoming",
+        message_type: message?.messageType || message?.type || "text",
+        status: isFromMe ? "sent" : "received",
+        evolution_message_id: evolutionMessageId,
+        participant_remote_jid: isGroup ? message?.key?.participant ?? null : null,
+        created_at: createdAt,
+      });
+
+      await supabaseAdmin
+        .from("chat_conversations")
+        .update({ updated_at: createdAt })
+        .eq("id", conversationId);
+      return true;
+    };
+
+    if (Array.isArray(chats) && chats.length > 0) {
+      const limitedChats = chats.slice(0, 100); // prioriza até 100 chats recentes
+      for (const chat of limitedChats) {
+        const remoteJid =
+          chat?.id?.remoteJid ??
+          chat?.id?._serialized ??
+          chat?.id ??
+          chat?.remoteJid ??
+          chat?.remote_jid ??
+          chat?.jid ??
+          null;
+        if (!remoteJid || typeof remoteJid !== "string") continue;
+        const isGroup = remoteJid.includes("@g.us");
+        const name =
+          chat?.name ??
+          chat?.pushName ??
+          chat?.contactName ??
+          chat?.subject ??
+          remoteJid.replace(/@.*$/, "") ??
+          remoteJid;
+        const avatarUrl =
+          chat?.profilePicUrl ??
+          chat?.pictureUrl ??
+          chat?.avatarUrl ??
+          null;
+
+        const upsertResult = await upsertContactAndConversation(
+          remoteJid,
+          name,
+          isGroup ? "group" : "individual",
+          avatarUrl
+        );
+        if (!upsertResult?.conversationId) continue;
+
+        const lastMessage =
+          chat?.lastMessage ??
+          (Array.isArray(chat?.messages) && chat.messages.length > 0
+            ? chat.messages[chat.messages.length - 1]
+            : null);
+        if (lastMessage && typeof lastMessage === "object") {
+          const inserted = await upsertMessageFromChat(
+            upsertResult.conversationId,
+            remoteJid,
+            isGroup,
+            lastMessage
+          );
+          if (inserted) {
+            chatsProcessed++;
+            messagesInserted++;
+          }
+        } else if (chat?.conversationTimestamp) {
+          const ts = new Date(Number(chat.conversationTimestamp) * 1000).toISOString();
+          await supabaseAdmin
+            .from("chat_conversations")
+            .update({ updated_at: ts })
+            .eq("id", upsertResult.conversationId);
+          chatsProcessed++;
+        }
+      }
+    }
+
     const { count: convCount } = await supabaseAdmin
       .from("chat_conversations")
       .select("*", { count: "exact", head: true })
@@ -556,6 +694,8 @@ app.post("/inboxes/:inboxId/sync", authMiddleware, async (req, res) => {
       contacts_processed: contacts.length + groups.length,
       contacts_created: contactsCreated,
       conversations_created: conversationsCreated,
+      chats_processed: chatsProcessed,
+      messages_inserted: messagesInserted,
     });
   } catch (err) {
     console.error("[POST /inboxes/:inboxId/sync] Error:", err);

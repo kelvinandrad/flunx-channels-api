@@ -16,7 +16,7 @@ function normalizeEvent(event) {
  * Extrai conteúdo da mensagem para exibição (Especificação § 9 - extractMessageContent).
  * Retorna texto ou placeholder [Imagem], [Áudio], etc.
  */
-function extractMessageContent(msg) {
+export function extractMessageContent(msg) {
   const message = msg?.message ?? msg;
   if (!message) return null;
   if (typeof message === "string") return message;
