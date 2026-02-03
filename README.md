@@ -1,42 +1,64 @@
 # flunx-channels-api
 
-API mínima para canais de comunicação: cria instâncias na Evolution API, persiste em Supabase (`chat_inboxes`) e expõe QR code para o frontend.
+API intermediária entre o frontend **flunx-chat** e a **Evolution API**. Persiste canais, contatos, conversas e mensagens no **Supabase**. Implementação da **Especificação Técnica flunx-channels-api v1.0**.
+
+## Visão geral
+
+| Componente           | Responsabilidade                                      |
+|----------------------|--------------------------------------------------------|
+| flunx-channels-api   | Orquestrar comunicação, processar webhooks, autenticar |
+| Evolution API        | Conectar WhatsApp, enviar/receber mensagens, QR codes  |
+| Supabase             | Persistir chat_inboxes, chat_contacts, chat_conversations, chat_messages |
+| Frontend (flunx-chat)| Interface; consome esta API com JWT Supabase           |
 
 ## Variáveis de ambiente
 
-- `PORT` – porta do servidor (default 3001)
-- `EVOLUTION_BASE_URL` – URL da Evolution API (ex: https://apiwpp.flunx.com.br)
-- `EVOLUTION_API_KEY` – API key da Evolution (header `apikey`)
-- `SUPABASE_URL` – URL do projeto Supabase
-- `SUPABASE_SERVICE_ROLE_KEY` – Chave service role (backend)
-- `SUPABASE_ANON_KEY` – (opcional) Para usar JWT do usuário e RLS
-- **`WEBHOOK_BASE_URL`** ou **`CHANNELS_API_PUBLIC_URL`** – URL pública desta API, usada pela Evolution para chamar o webhook. Em produção use HTTPS (ex: `https://api-canais.flunx.com.br`). Em dev use ngrok (ex: `https://abc123.ngrok.io`).
+- **PORT** – porta do servidor (default 3001)
+- **SUPABASE_URL** – URL do projeto Supabase
+- **SUPABASE_SERVICE_KEY** ou **SUPABASE_SERVICE_ROLE_KEY** – Service Role Key (não usar anon key aqui)
+- **SUPABASE_ANON_KEY** – (opcional) Para `createUserClient` e RLS com JWT do usuário
+- **EVOLUTION_API_URL** ou **EVOLUTION_BASE_URL** – URL da Evolution API (ex: https://apiwpp.flunx.com.br)
+- **EVOLUTION_API_KEY** – API key da Evolution (header `apikey`)
+- **WEBHOOK_BASE_URL** – URL pública desta API para a Evolution chamar o webhook (ex: https://api-canais.flunx.com.br)
+- **WEBHOOK_SECRET_TOKEN** – (opcional) Token para validar webhook (query `?token=` ou header `X-Webhook-Token`)
+
+## Autenticação
+
+As rotas protegidas exigem **Bearer JWT** do Supabase no header `Authorization`. O middleware valida com `supabase.auth.getUser(token)` e, quando aplicável, verifica acesso à organização via tabela **organization_members**.
 
 ## Endpoints
 
-- **POST /channels** – Criar canal (body: `type`, `name`, `organization_id`). Após criar, registra o webhook na Evolution para `{WEBHOOK_BASE_URL}/webhook/evolution`.
-- **GET /channels/:inboxId/qrcode** – Obter QR code do canal
-- **GET /channels?organization_id=** – Listar canais da organização
-- **POST /webhook/evolution** – Webhook chamado pela Evolution (MESSAGES_UPSERT, CONNECTION_UPDATE, QRCODE_UPDATED). Sem autenticação; a Evolution envia o payload.
-- **GET /health** – Health check
+- **GET /health** – Health check (sem auth)
+- **POST /webhook/evolution** – Webhook da Evolution (sem auth): QRCODE_UPDATED, CONNECTION_UPDATE, MESSAGES_UPSERT, MESSAGES_UPDATE
 
-Contrato completo em `flunx-v2/docs/api-canais.md`.
+### Canais (auth)
 
-## Expor a API para a Evolution (webhook)
+- **POST /channels** – Criar canal (body: `organization_id`, `name`)
+- **GET /channels** – Listar canais (query: `organization_id` opcional)
+- **GET /channels/:id/info** – Atualizar e retornar info do canal
+- **GET /channels/:inboxId/qrcode** – Obter/atualizar QR code
+- **POST /channels/:id/reconnect** – Reconectar canal (nova instância + QR)
+- **DELETE /channels/:id** – Remover canal e instância Evolution
 
-A Evolution precisa conseguir fazer **POST** na URL do webhook a partir da internet. Você deve:
+### Inboxes / conversas / mensagens (auth)
 
-1. **Produção:** Garantir que a API está em um host público com HTTPS (ex: `https://api-canais.flunx.com.br`) e definir no `.env`:
-   ```bash
-   WEBHOOK_BASE_URL=https://api-canais.flunx.com.br
-   ```
-2. **Desenvolvimento local:** Expor a porta com [ngrok](https://ngrok.com/) (ou similar) e usar a URL gerada:
-   ```bash
-   ngrok http 3001
-   # Use a URL HTTPS exibida (ex: https://abc123.ngrok-free.app)
-   WEBHOOK_BASE_URL=https://abc123.ngrok-free.app
-   ```
-   Reinicie a API após definir a variável. Ao criar um canal, a Evolution passará a enviar eventos para `{WEBHOOK_BASE_URL}/webhook/evolution`.
+- **POST /inboxes/:inboxId/sync** – Sincronizar contatos e conversas da Evolution
+- **GET /inboxes/:inboxId/conversations** – Listar conversas (query: `limit`, `before`, `days`, `only_with_messages`)
+- **GET /inboxes/:inboxId/contacts** – Listar contatos
+- **GET /conversations/:conversationId/messages** – Listar mensagens
+- **POST /conversations/:conversationId/messages** – Enviar mensagem (body: `content`)
+
+## Estrutura do projeto
+
+```
+src/
+  index.js           # Entry point + rotas Express
+  evolution.js       # Cliente Evolution API
+  supabase.js        # supabaseAdmin + createUserClient
+  webhookEvolution.js# Handler de webhooks
+  auth.js            # authMiddleware + validateOrganizationAccess
+  utils.js           # randomId, isValidUUID, slugify
+```
 
 ## Executar (local)
 
@@ -49,23 +71,13 @@ npm run dev
 
 ## Deploy (Docker Swarm)
 
-1. Crie `/root/flunx-channels-api/.env` com as variáveis (ver `.env.example`).
-2. Build da imagem (no diretório do projeto):
-   ```bash
-   docker build -t flunx-channels-api:latest /root/flunx-channels-api
-   ```
-3. Deploy do stack (a partir de `/root`, para o bind do `.env`):
-   ```bash
-   docker stack deploy -c /root/flunx-channels-api/flunx-channels-api.yaml flunx-channels-api
-   ```
-4. Configure o DNS para `api-canais.flunx.com.br` apontar para o servidor e use essa URL nos frontends (`VITE_CHANNELS_API_URL`). Os stacks `flunx-chat.yaml` e `flunx-app.yaml` já usam `https://api-canais.flunx.com.br` em produção.
+1. Crie `.env` com as variáveis (ver `.env.example`).
+2. Build: `docker build -t flunx-channels-api:latest .`
+3. Deploy: `docker stack deploy -c flunx-channels-api.yaml flunx-channels-api`
+4. DNS: aponte `api-canais.flunx.com.br` para o servidor e use essa URL no frontend.
 
-## Evolution API
+## Referências
 
-Paths usados:
-- `POST /instance/create` – criar instância
-- `GET /instance/connect/:instanceName` – conectar e obter QR
-- `GET /instance/connectionState/:instanceName` – estado da conexão
-- **`POST /webhook/set/:instanceName`** – configurar webhook da instância (body: `enabled`, `url`, `events`). Conferido na [doc Evolution – Set Webhook](https://doc.evolution-api.com/v2/api-reference/webhook/set). Find Webhook: `GET /webhook/find/[instance]`.
-
-Se sua versão usar prefixo (ex: `/v1/`), ajustar em `src/evolution.js`.
+- [Evolution API v2 Docs](https://doc.evolution-api.com/v2/)
+- [Supabase JS Client](https://supabase.com/docs/reference/javascript)
+- [Express.js](https://expressjs.com/)

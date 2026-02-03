@@ -3,7 +3,10 @@
  * Evolution v1/v2: create = POST /instance/create, connect = GET /instance/connect/:instanceName
  */
 
-const baseUrl = process.env.EVOLUTION_BASE_URL || "https://apiwpp.flunx.com.br";
+const baseUrl =
+  process.env.EVOLUTION_API_URL ||
+  process.env.EVOLUTION_BASE_URL ||
+  "https://apiwpp.flunx.com.br";
 const apiKey = process.env.EVOLUTION_API_KEY || "";
 
 function headers() {
@@ -270,6 +273,70 @@ export async function findChats(instanceName) {
 }
 
 /**
+ * Busca todos os contatos da instância Evolution.
+ * POST /chat/findContacts/{instanceName}
+ * Retorna lista de contatos com id, remoteJid, pushName, profilePicUrl, etc.
+ * Usado para sincronização de conversas (findChats retorna poucos chats).
+ * @param {string} instanceName - Nome da instância
+ * @returns {Promise<{ success: boolean, contacts?: array, error?: string }>}
+ */
+export async function findContacts(instanceName) {
+  if (!instanceName) {
+    return { success: false, error: "instanceName is required" };
+  }
+  try {
+    const res = await fetch(`${baseUrl}/chat/findContacts/${encodeURIComponent(instanceName)}`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        success: false,
+        error: data?.message || data?.error || `HTTP ${res.status}`,
+        status: res.status,
+      };
+    }
+    const contacts = Array.isArray(data) ? data : data?.contacts ?? data?.data ?? [];
+    return { success: true, contacts };
+  } catch (e) {
+    return { success: false, error: e.message || "Evolution findContacts failed" };
+  }
+}
+
+/**
+ * Busca todos os grupos da instância Evolution.
+ * GET /group/fetchAllGroups/{instanceName}
+ * Retorna lista de grupos com id (remoteJid), subject (nome), etc.
+ * @param {string} instanceName - Nome da instância
+ * @returns {Promise<{ success: boolean, groups?: array, error?: string }>}
+ */
+export async function fetchAllGroups(instanceName) {
+  if (!instanceName) {
+    return { success: false, error: "instanceName is required" };
+  }
+  try {
+    const res = await fetch(`${baseUrl}/group/fetchAllGroups/${encodeURIComponent(instanceName)}`, {
+      method: "GET",
+      headers: headers(),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        success: false,
+        error: data?.message || data?.error || `HTTP ${res.status}`,
+        status: res.status,
+      };
+    }
+    const groups = Array.isArray(data) ? data : data?.groups ?? data?.data ?? [];
+    return { success: true, groups };
+  } catch (e) {
+    return { success: false, error: e.message || "Evolution fetchAllGroups failed" };
+  }
+}
+
+/**
  * Busca mensagens de um chat na Evolution.
  * POST /chat/findMessages/{instanceName}
  * Body: { where: { key: { remoteJid: "..." } }, limit?: number }
@@ -306,5 +373,33 @@ export async function findMessages(instanceName, remoteJid, limit = 50) {
     return { success: false, error: e.message || "Evolution findMessages failed" };
   }
 }
+
+/**
+ * Busca foto de perfil do contato (Especificação § 6).
+ * POST /chat/fetchProfilePictureUrl/:instanceName
+ * @param {string} instanceName - Nome da instância
+ * @param {string} remoteJid - JID (ex.: 5511999999999@s.whatsapp.net)
+ * @returns {Promise<string|null>} URL da foto ou null
+ */
+export async function fetchProfilePicture(instanceName, remoteJid) {
+  if (!instanceName || !remoteJid) return null;
+  try {
+    const res = await fetch(
+      `${baseUrl}/chat/fetchProfilePictureUrl/${encodeURIComponent(instanceName)}`,
+      {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ number: remoteJid }),
+      }
+    );
+    const data = await res.json().catch(() => ({}));
+    return data?.profilePictureUrl ?? data?.profilePicture ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Alias para compatibilidade com a especificação (§ 6). */
+export { sendText as sendTextMessage };
 
 export { baseUrl as evolutionBaseUrl };

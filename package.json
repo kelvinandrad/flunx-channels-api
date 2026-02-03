@@ -1,7 +1,7 @@
 {
   "name": "flunx-channels-api",
   "version": "1.0.0",
-  "description": "API mínima para canais de comunicação (Evolution + Supabase)",
+  "description": "API intermediária entre flunx-chat e Evolution API (Especificação flunx-channels-api § 1)",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
