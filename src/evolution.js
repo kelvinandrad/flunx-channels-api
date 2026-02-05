@@ -109,25 +109,20 @@ export async function getConnectionState(instanceName) {
 }
 
 /**
- * Configura o webhook da instância para receber eventos (MESSAGES_UPSERT, CONNECTION_UPDATE, etc.).
- * Evolution v2: POST /webhook/set/{instanceName} com body url, enabled, events.
- * @param {string} instanceName - Nome da instância
- * @param {string} webhookUrl - URL que receberá os eventos (ex.: https://nossa-api.com/webhook/evolution)
- * @param {string[]} [events] - Lista de eventos (ex.: MESSAGES_UPSERT, MESSAGES_UPDATE, CONNECTION_UPDATE, QRCODE_UPDATED)
- * @returns {Promise<{ success: boolean, error?: string }>}
+ * Configura settings da instância (Reject Calls, Ignore Groups, etc. = false).
+ * Evolution v2: POST /settings/set/{instanceName}
  */
-export async function setWebhook(instanceName, webhookUrl, events = ["MESSAGES_UPSERT", "MESSAGES_UPDATE", "CONNECTION_UPDATE", "QRCODE_UPDATED"]) {
+export async function setInstanceSettings(instanceName) {
   try {
-    // Evolution v2.2.3 requer body com propriedade "webhook"
     const body = {
-      webhook: {
-        enabled: true,
-        url: webhookUrl,
-        webhook_by_events: false,
-        events,
-      },
+      rejectCalls: false,
+      ignoreGroups: false,
+      alwaysOnline: false,
+      readMessages: false,
+      syncFullHistory: false,
+      readStatus: false,
     };
-    const res = await fetch(`${baseUrl}/webhook/set/${encodeURIComponent(instanceName)}`, {
+    const res = await fetch(`${baseUrl}/settings/set/${encodeURIComponent(instanceName)}`, {
       method: "POST",
       headers: headers(),
       body: JSON.stringify(body),
@@ -138,7 +133,7 @@ export async function setWebhook(instanceName, webhookUrl, events = ["MESSAGES_U
     }
     return { success: true };
   } catch (e) {
-    return { success: false, error: e.message || "Evolution setWebhook failed" };
+    return { success: false, error: e.message || "Evolution setInstanceSettings failed" };
   }
 }
 

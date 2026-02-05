@@ -1,0 +1,33 @@
+# flunx-evolution-api (ex flunx-channels-api). Exposta em https://api-canais.flunx.com.br
+# .env: use /root/flunx-evolution-api/.env após renomear a pasta; ou /root/flunx-channels-api/.env
+
+services:
+  api:
+    image: flunx-evolution-api:latest
+    environment:
+      PORT: "3001"
+    volumes:
+      - type: bind
+        source: /root/flunx-channels-api/.env
+        target: /app/.env
+        read_only: true
+    networks:
+      - externa
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        traefik.enable: "true"
+        traefik.docker.network: "externa"
+        traefik.http.routers.flunx-evolution-api.rule: "Host(`api-canais.flunx.com.br`)"
+        traefik.http.routers.flunx-evolution-api.entrypoints: "websecure"
+        traefik.http.routers.flunx-evolution-api.tls.certresolver: "cf"
+        traefik.http.services.flunx-evolution-api.loadbalancer.server.port: "3001"
+        traefik.http.services.flunx-evolution-api.loadbalancer.passHostHeader: "true"
+
+networks:
+  externa:
+    external: true

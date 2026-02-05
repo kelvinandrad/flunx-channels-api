@@ -1,7 +1,7 @@
 {
-  "name": "flunx-channels-api",
+  "name": "flunx-evolution-api",
   "version": "1.0.0",
-  "description": "API intermediária entre flunx-chat e Evolution API (Especificação flunx-channels-api § 1)",
+  "description": "API Evolution: criar/configurar instâncias e canal no Flunx (eventos via RabbitMQ)",
   "main": "src/index.js",
   "type": "module",
   "scripts": {

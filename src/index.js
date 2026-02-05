@@ -1,6 +1,6 @@
 /**
- * flunx-channels-api - Entry point (Especificação § 10).
- * API intermediária entre flunx-chat (frontend) e Evolution API.
+ * flunx-evolution-api - Entry point.
+ * Cria/configura instâncias Evolution e canal no Flunx. Eventos em tempo real vêm dos eventos globais do RabbitMQ (consumidos por flunx-rabbitmq-api); não é necessário configurar RabbitMQ por instância.
  */
 
 import "dotenv/config";
@@ -11,7 +11,7 @@ import {
   connectInstance,
   getConnectionState,
   evolutionBaseUrl,
-  setWebhook,
+  setInstanceSettings,
   deleteInstance,
   fetchInstanceInfo,
   formatBrazilianPhone,
@@ -22,16 +22,11 @@ import {
   findChats,
 } from "./evolution.js";
 import { getSupabaseClient, supabaseAdmin } from "./supabase.js";
-import { handleEvolutionWebhook, extractMessageContent } from "./webhookEvolution.js";
 import { authMiddleware, validateOrganizationAccess } from "./auth.js";
-import { randomId, isValidUUID, slugify } from "./utils.js";
+import { randomId, isValidUUID, slugify, extractMessageContent } from "./utils.js";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const WEBHOOK_BASE_URL =
-  process.env.WEBHOOK_BASE_URL ||
-  process.env.CHANNELS_API_PUBLIC_URL ||
-  `http://localhost:${PORT}`;
 
 app.use(
   cors({
@@ -48,11 +43,10 @@ app.use(
 );
 app.use(express.json());
 
-// --- Health & Webhook (sem auth) ---
+// --- Health ---
 app.get("/health", (_, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
-app.post("/webhook/evolution", handleEvolutionWebhook);
 
 /** Helper: Supabase com JWT do usuário (RLS) a partir do request. */
 function supabaseFromReq(req) {
@@ -90,17 +84,9 @@ app.post("/channels", authMiddleware, async (req, res) => {
       });
     }
 
-    const webhookUrl = `${WEBHOOK_BASE_URL.replace(/\/$/, "")}/webhook/evolution`;
-    const webhookWithToken = process.env.WEBHOOK_SECRET_TOKEN
-      ? `${webhookUrl}?token=${encodeURIComponent(process.env.WEBHOOK_SECRET_TOKEN)}`
-      : webhookUrl;
-    const webhookResult = await setWebhook(instanceName, webhookWithToken);
-    if (!webhookResult.success) {
-      await deleteInstance(instanceName);
-      return res.status(500).json({
-        error: "Webhook registration failed",
-        detail: webhookResult.error,
-      });
+    const settingsResult = await setInstanceSettings(instanceName);
+    if (!settingsResult.success) {
+      console.warn("[POST /channels] setInstanceSettings failed:", settingsResult.error);
     }
 
     const { data: inbox, error } = await supabaseAdmin
@@ -203,6 +189,9 @@ app.get("/channels/:id/info", authMiddleware, async (req, res) => {
     let connection_status = "pending";
     if (info.instance?.state === "open") connection_status = "connected";
     else if (info.instance?.state === "close") connection_status = "disconnected";
+    // Não sobrescrever "connected" com "pending" quando a Evolution não retornar state (ex.: timeout/erro).
+    // O worker (rabbitmq-api) é a fonte de verdade para connection.update; aqui só refletimos "disconnected" se for explícito.
+    else if (inbox.connection_status === "connected") connection_status = "connected";
 
     const updates = {
       connection_status,
@@ -320,17 +309,7 @@ app.post("/channels/:id/reconnect", authMiddleware, async (req, res) => {
 
     const connectResult = await connectInstance(newInstanceName);
     const qrCode = connectResult.qrCode ?? null;
-    const webhookUrl = process.env.WEBHOOK_SECRET_TOKEN
-      ? `${WEBHOOK_BASE_URL.replace(/\/$/, "")}/webhook/evolution?token=${encodeURIComponent(process.env.WEBHOOK_SECRET_TOKEN)}`
-      : `${WEBHOOK_BASE_URL.replace(/\/$/, "")}/webhook/evolution`;
-    const webhookResult = await setWebhook(newInstanceName, webhookUrl);
-    if (!webhookResult.success) {
-      await deleteInstance(newInstanceName);
-      return res.status(500).json({
-        error: "Webhook registration failed",
-        detail: webhookResult.error,
-      });
-    }
+    await setInstanceSettings(newInstanceName);
 
     await supabaseAdmin
       .from("chat_inboxes")

@@ -1,35 +1,34 @@
-# flunx-channels-api
+# flunx-evolution-api
 
-API intermediária entre o frontend **flunx-chat** e a **Evolution API**. Persiste canais, contatos, conversas e mensagens no **Supabase**. Implementação da **Especificação Técnica flunx-channels-api v1.0**.
+API de canais Evolution: cria/configura instâncias na Evolution e persiste canais no **Supabase**. Eventos (QR, connection, mensagens) são consumidos pela **flunx-rabbitmq-api** via RabbitMQ.
 
 ## Visão geral
 
 | Componente           | Responsabilidade                                      |
 |----------------------|--------------------------------------------------------|
-| flunx-channels-api   | Orquestrar comunicação, processar webhooks, autenticar |
-| Evolution API        | Conectar WhatsApp, enviar/receber mensagens, QR codes  |
+| flunx-evolution-api  | Criar instância, configurar settings, canais, sync, mensagens (eventos em tempo real vêm do RabbitMQ global da Evolution) |
+| flunx-rabbitmq-api   | Consumir eventos globais Evolution via RabbitMQ (QR, connection, messages)     |
+| Evolution API        | Conectar WhatsApp; publica eventos no RabbitMQ (global)                |
 | Supabase             | Persistir chat_inboxes, chat_contacts, chat_conversations, chat_messages |
 | Frontend (flunx-chat)| Interface; consome esta API com JWT Supabase           |
 
 ## Variáveis de ambiente
 
-- **PORT** – porta do servidor (default 3001)
-- **SUPABASE_URL** – URL do projeto Supabase
-- **SUPABASE_SERVICE_KEY** ou **SUPABASE_SERVICE_ROLE_KEY** – Service Role Key (não usar anon key aqui)
-- **SUPABASE_ANON_KEY** – (opcional) Para `createUserClient` e RLS com JWT do usuário
-- **EVOLUTION_API_URL** ou **EVOLUTION_BASE_URL** – URL da Evolution API (ex: https://apiwpp.flunx.com.br)
-- **EVOLUTION_API_KEY** – API key da Evolution (header `apikey`)
-- **WEBHOOK_BASE_URL** – URL pública desta API para a Evolution chamar o webhook (ex: https://api-canais.flunx.com.br)
-- **WEBHOOK_SECRET_TOKEN** – (opcional) Token para validar webhook (query `?token=` ou header `X-Webhook-Token`)
+- **PORT** – porta (default 3001)
+- **SUPABASE_URL**, **SUPABASE_SERVICE_KEY** – Supabase
+- **SUPABASE_ANON_KEY** – (opcional) RLS com JWT
+- **EVOLUTION_API_URL** – URL da Evolution (ex: https://apiwpp.flunx.com.br)
+- **EVOLUTION_API_KEY** – API key (header `apikey`)
+
+Eventos: Evolution deve ter **RABBITMQ_GLOBAL_ENABLED=true** e envs de RabbitMQ configuradas.
 
 ## Autenticação
 
-As rotas protegidas exigem **Bearer JWT** do Supabase no header `Authorization`. O middleware valida com `supabase.auth.getUser(token)` e, quando aplicável, verifica acesso à organização via tabela **organization_members**.
+Rotas protegidas exigem **Bearer JWT** do Supabase (`Authorization`). Validação via `supabase.auth.getUser` e `organization_members`.
 
 ## Endpoints
 
-- **GET /health** – Health check (sem auth)
-- **POST /webhook/evolution** – Webhook da Evolution (sem auth): QRCODE_UPDATED, CONNECTION_UPDATE, MESSAGES_UPSERT, MESSAGES_UPDATE
+- **GET /health** – Health check
 
 ### Canais (auth)
 
