@@ -337,7 +337,7 @@ export async function fetchAllGroups(instanceName) {
  * Body: { where: { key: { remoteJid: "..." } }, limit?: number }
  * @param {string} instanceName - Nome da instância
  * @param {string} remoteJid - JID do chat (ex: 5562999999999@s.whatsapp.net)
- * @param {number} [limit=50] - Limite de mensagens
+ * @param {number} [limit=50] - Limite de mensagens (Evolution costuma aceitar até 500+)
  * @returns {Promise<{ success: boolean, messages?: array, error?: string }>}
  */
 export async function findMessages(instanceName, remoteJid, limit = 50) {
@@ -347,7 +347,7 @@ export async function findMessages(instanceName, remoteJid, limit = 50) {
   try {
     const body = {
       where: { key: { remoteJid } },
-      limit: Math.min(Math.max(limit, 1), 100),
+      limit: Math.min(Math.max(limit, 1), 500),
     };
     const res = await fetch(`${baseUrl}/chat/findMessages/${encodeURIComponent(instanceName)}`, {
       method: "POST",

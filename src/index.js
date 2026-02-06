@@ -20,6 +20,7 @@ import {
   findContacts,
   fetchAllGroups,
   findChats,
+  findMessages,
 } from "./evolution.js";
 import { getSupabaseClient, supabaseAdmin } from "./supabase.js";
 import { authMiddleware, validateOrganizationAccess } from "./auth.js";
@@ -381,8 +382,13 @@ app.delete("/channels/:id", authMiddleware, async (req, res) => {
 });
 
 // --- POST /inboxes/:inboxId/sync (Especificação § 8.2) ---
+// Query: import_messages_days (opcional) — se > 0, busca histórico de mensagens dos últimos N dias por conversa (Evolution findMessages).
 app.post("/inboxes/:inboxId/sync", authMiddleware, async (req, res) => {
   const { inboxId } = req.params;
+  const importMessagesDays = Math.min(
+    Math.max(parseInt(req.query.import_messages_days, 10) || 0, 0),
+    30
+  );
   if (!isValidUUID(inboxId)) {
     return res.status(400).json({ error: "Invalid inbox ID format" });
   }
@@ -422,16 +428,15 @@ app.post("/inboxes/:inboxId/sync", authMiddleware, async (req, res) => {
     let chatsProcessed = 0;
     let messagesInserted = 0;
 
-    const upsertContactAndConversation = async (
+    // Só contato (sem conversa). Conversa é criada apenas ao inserir mensagem.
+    const upsertContactOnly = async (
       remoteJid,
       name,
       contactType,
       avatarUrl
     ) => {
-      if (!remoteJid || typeof remoteJid !== "string") return;
+      if (!remoteJid || typeof remoteJid !== "string") return null;
       const sourceId = remoteJid;
-
-      let contactId = null;
       const { data: existingContact } = await supabaseAdmin
         .from("chat_contacts")
         .select("id")
@@ -447,60 +452,56 @@ app.post("/inboxes/:inboxId/sync", authMiddleware, async (req, res) => {
       if (avatarUrl != null) updateData.avatar_url = avatarUrl;
 
       if (existingContact) {
-        contactId = existingContact.id;
         await supabaseAdmin
           .from("chat_contacts")
           .update(updateData)
-          .eq("id", contactId);
-      } else {
-        const { data: newContact, error: contactError } = await supabaseAdmin
-          .from("chat_contacts")
-          .insert({
-            inbox_id: inbox.id,
-            organization_id: inbox.organization_id,
-            remote_jid: remoteJid,
-            source_id: sourceId,
-            name,
-            contact_type: contactType,
-            ...(avatarUrl != null && { avatar_url: avatarUrl }),
-          })
-          .select("id")
-          .single();
-        if (!contactError && newContact) {
-          contactId = newContact.id;
-          contactsCreated++;
-        }
+          .eq("id", existingContact.id);
+        return existingContact.id;
       }
-      if (!contactId) return null;
+      const { data: newContact, error: contactError } = await supabaseAdmin
+        .from("chat_contacts")
+        .insert({
+          inbox_id: inbox.id,
+          organization_id: inbox.organization_id,
+          remote_jid: remoteJid,
+          source_id: sourceId,
+          name,
+          contact_type: contactType,
+          ...(avatarUrl != null && { avatar_url: avatarUrl }),
+        })
+        .select("id")
+        .single();
+      if (!contactError && newContact) {
+        contactsCreated++;
+        return newContact.id;
+      }
+      return null;
+    };
 
+    const getOrCreateConversation = async (contactId) => {
+      if (!contactId) return null;
       const { data: existingConv } = await supabaseAdmin
         .from("chat_conversations")
         .select("id")
         .eq("inbox_id", inbox.id)
         .eq("contact_id", contactId)
         .maybeSingle();
-
-      let conversationId = existingConv?.id ?? null;
-
-      if (!existingConv) {
-        const { data: newConv, error: convError } = await supabaseAdmin
-          .from("chat_conversations")
-          .insert({
-            inbox_id: inbox.id,
-            contact_id: contactId,
-            organization_id: inbox.organization_id,
-            status: "open",
-          })
-          .select("id")
-          .single();
-        if (!convError && newConv?.id) {
-          conversationId = newConv.id;
-          conversationsCreated++;
-        }
+      if (existingConv) return existingConv.id;
+      const { data: newConv, error: convError } = await supabaseAdmin
+        .from("chat_conversations")
+        .insert({
+          inbox_id: inbox.id,
+          contact_id: contactId,
+          organization_id: inbox.organization_id,
+          status: "open",
+        })
+        .select("id")
+        .single();
+      if (!convError && newConv?.id) {
+        conversationsCreated++;
+        return newConv.id;
       }
-
-      if (!conversationId) return { contactId };
-      return { contactId, conversationId };
+      return null;
     };
 
     for (const contact of contacts) {
@@ -512,7 +513,7 @@ app.post("/inboxes/:inboxId/sync", authMiddleware, async (req, res) => {
         contact.name ?? contact.pushName ?? remoteJid.replace(/@.*$/, "") ?? remoteJid;
       const avatarUrl =
         contact.profilePicUrl ?? contact.profile_pic_url ?? null;
-      await upsertContactAndConversation(remoteJid, name, "individual", avatarUrl);
+      await upsertContactOnly(remoteJid, name, "individual", avatarUrl);
     }
 
     for (const group of groups) {
@@ -524,7 +525,7 @@ app.post("/inboxes/:inboxId/sync", authMiddleware, async (req, res) => {
         group.subject ?? group.name ?? remoteJid.replace(/@.*$/, "") ?? remoteJid;
       const avatarUrl =
         group.pictureUrl ?? group.picture_url ?? group.subjectPictureUrl ?? null;
-      await upsertContactAndConversation(remoteJid, name, "group", avatarUrl);
+      await upsertContactOnly(remoteJid, name, "group", avatarUrl);
     }
 
     const upsertMessageFromChat = async (
@@ -589,48 +590,80 @@ app.post("/inboxes/:inboxId/sync", authMiddleware, async (req, res) => {
       return true;
     };
 
-    if (Array.isArray(chats) && chats.length > 0) {
-      const limitedChats = chats.slice(0, 100); // prioriza até 100 chats recentes
-      for (const chat of limitedChats) {
-        const remoteJid =
-          chat?.id?.remoteJid ??
-          chat?.id?._serialized ??
-          chat?.id ??
-          chat?.remoteJid ??
-          chat?.remote_jid ??
-          chat?.jid ??
-          null;
-        if (!remoteJid || typeof remoteJid !== "string") continue;
-        const isGroup = remoteJid.includes("@g.us");
-        const name =
-          chat?.name ??
-          chat?.pushName ??
-          chat?.contactName ??
-          chat?.subject ??
-          remoteJid.replace(/@.*$/, "") ??
-          remoteJid;
-        const avatarUrl =
-          chat?.profilePicUrl ??
-          chat?.pictureUrl ??
-          chat?.avatarUrl ??
-          null;
+    const limitedChats = Array.isArray(chats) && chats.length > 0 ? chats.slice(0, 100) : [];
 
-        const upsertResult = await upsertContactAndConversation(
-          remoteJid,
-          name,
-          isGroup ? "group" : "individual",
-          avatarUrl
-        );
-        if (!upsertResult?.conversationId) continue;
+    // Constantes para importação de histórico (único lugar)
+    const sinceTs = Date.now() / 1000 - importMessagesDays * 24 * 3600;
+    const HISTORY_LIMIT_PER_CHAT = 500;
+    const HISTORY_MAX_CHATS = 80;
 
-        const lastMessage =
-          chat?.lastMessage ??
-          (Array.isArray(chat?.messages) && chat.messages.length > 0
-            ? chat.messages[chat.messages.length - 1]
-            : null);
-        if (lastMessage && typeof lastMessage === "object") {
+    // Helper único: findMessages + contato + conversa + mensagens (evita duplicação e duplicatas por evolution_message_id)
+    const importMessagesForContact = async (remoteJid, name, isGroup, avatarUrl) => {
+      const { success, messages: msgs } = await findMessages(
+        inbox.evolution_instance_name,
+        remoteJid,
+        HISTORY_LIMIT_PER_CHAT
+      );
+      if (!success || !Array.isArray(msgs) || msgs.length === 0) return 0;
+      const contactId = await upsertContactOnly(
+        remoteJid,
+        name,
+        isGroup ? "group" : "individual",
+        avatarUrl ?? null
+      );
+      if (!contactId) return 0;
+      const conversationId = await getOrCreateConversation(contactId);
+      if (!conversationId) return 0;
+      let inserted = 0;
+      for (const msg of msgs) {
+        const ts =
+          msg?.messageTimestamp ?? msg?.message_timestamp ?? msg?.timestamp ?? msg?.conversationTimestamp;
+        if (ts != null && Number(ts) < sinceTs) continue;
+        if (await upsertMessageFromChat(conversationId, remoteJid, isGroup, msg)) inserted++;
+      }
+      return inserted;
+    };
+
+    // 1) Chats com lastMessage (quando findChats retorna dados)
+    for (const chat of limitedChats) {
+      const remoteJid =
+        chat?.id?.remoteJid ??
+        chat?.id?._serialized ??
+        chat?.id ??
+        chat?.remoteJid ??
+        chat?.remote_jid ??
+        chat?.jid ??
+        null;
+      if (!remoteJid || typeof remoteJid !== "string") continue;
+      const isGroup = remoteJid.includes("@g.us");
+      const name =
+        chat?.name ??
+        chat?.pushName ??
+        chat?.contactName ??
+        chat?.subject ??
+        remoteJid.replace(/@.*$/, "") ??
+        remoteJid;
+      const avatarUrl =
+        chat?.profilePicUrl ?? chat?.pictureUrl ?? chat?.avatarUrl ?? null;
+
+      const contactId = await upsertContactOnly(
+        remoteJid,
+        name,
+        isGroup ? "group" : "individual",
+        avatarUrl
+      );
+      if (!contactId) continue;
+
+      const lastMessage =
+        chat?.lastMessage ??
+        (Array.isArray(chat?.messages) && chat.messages.length > 0
+          ? chat.messages[chat.messages.length - 1]
+          : null);
+      if (lastMessage && typeof lastMessage === "object") {
+        const conversationId = await getOrCreateConversation(contactId);
+        if (conversationId) {
           const inserted = await upsertMessageFromChat(
-            upsertResult.conversationId,
+            conversationId,
             remoteJid,
             isGroup,
             lastMessage
@@ -639,13 +672,64 @@ app.post("/inboxes/:inboxId/sync", authMiddleware, async (req, res) => {
             chatsProcessed++;
             messagesInserted++;
           }
-        } else if (chat?.conversationTimestamp) {
-          const ts = new Date(Number(chat.conversationTimestamp) * 1000).toISOString();
-          await supabaseAdmin
-            .from("chat_conversations")
-            .update({ updated_at: ts })
-            .eq("id", upsertResult.conversationId);
-          chatsProcessed++;
+        }
+      }
+    }
+
+    // 2) Importar histórico: quando findChats trouxer chats, usa limitedChats; senão fallback por findContacts + grupos (estilo Chatwoot)
+    if (importMessagesDays > 0) {
+      if (limitedChats.length > 0) {
+        for (let i = 0; i < Math.min(limitedChats.length, HISTORY_MAX_CHATS); i++) {
+          const chat = limitedChats[i];
+          const remoteJid =
+            chat?.id?.remoteJid ??
+            chat?.id?._serialized ??
+            chat?.id ??
+            chat?.remoteJid ??
+            chat?.remote_jid ??
+            chat?.jid ??
+            null;
+          if (!remoteJid || typeof remoteJid !== "string") continue;
+          const isGroup = remoteJid.includes("@g.us");
+          const name =
+            chat?.name ??
+            chat?.pushName ??
+            chat?.contactName ??
+            chat?.subject ??
+            remoteJid.replace(/@.*$/, "") ??
+            remoteJid;
+          const avatarUrl = chat?.profilePicUrl ?? chat?.pictureUrl ?? chat?.avatarUrl ?? null;
+          messagesInserted += await importMessagesForContact(remoteJid, name, isGroup, avatarUrl);
+        }
+      } else {
+        const fallbackSources = [];
+        for (const c of contacts) {
+          const remoteJid = c.id?.remoteJid ?? c.remoteJid ?? c.id;
+          if (!remoteJid || typeof remoteJid !== "string" || String(remoteJid).endsWith("@g.us")) continue;
+          fallbackSources.push({
+            remoteJid,
+            name: c.name ?? c.pushName ?? String(remoteJid).replace(/@.*$/, "") || remoteJid,
+            isGroup: false,
+            avatarUrl: c.profilePicUrl ?? c.profile_pic_url ?? null,
+          });
+        }
+        for (const g of groups) {
+          const remoteJid = g.id?.remoteJid ?? g.id ?? g.remoteJid;
+          if (!remoteJid || typeof remoteJid !== "string" || !String(remoteJid).endsWith("@g.us")) continue;
+          fallbackSources.push({
+            remoteJid,
+            name: g.subject ?? g.name ?? String(remoteJid).replace(/@.*$/, "") || remoteJid,
+            isGroup: true,
+            avatarUrl: g.pictureUrl ?? g.picture_url ?? g.subjectPictureUrl ?? null,
+          });
+        }
+        for (const item of fallbackSources.slice(0, HISTORY_MAX_CHATS)) {
+          messagesInserted += await importMessagesForContact(
+            item.remoteJid,
+            item.name,
+            item.isGroup,
+            item.avatarUrl
+          );
         }
       }
     }
@@ -668,6 +752,17 @@ app.post("/inboxes/:inboxId/sync", authMiddleware, async (req, res) => {
       })
       .eq("id", inboxId);
 
+    console.log(
+      "[POST /inboxes/:inboxId/sync] OK:",
+      {
+        inboxId,
+        contacts_created: contactsCreated,
+        conversations_created: conversationsCreated,
+        chats_processed: chatsProcessed,
+        messages_inserted: messagesInserted,
+        import_messages_days: importMessagesDays || 0,
+      }
+    );
     return res.json({
       success: true,
       contacts_processed: contacts.length + groups.length,
